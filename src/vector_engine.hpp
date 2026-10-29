@@ -435,13 +435,20 @@ public:
 
 std::string jS(const std::string& s) {
     std::string o = "\"";
-    for (char c : s) {
+    const char hex[] = "0123456789abcdef";
+    for (unsigned char c : s) {
         if      (c == '"')  o += "\\\"";
         else if (c == '\\') o += "\\\\";
+        else if (c == '\b') o += "\\b";
+        else if (c == '\f') o += "\\f";
         else if (c == '\n') o += "\\n";
         else if (c == '\r') o += "\\r";
         else if (c == '\t') o += "\\t";
-        else                o += c;
+        else if (c < 0x20) {
+            o += "\\u00";
+            o += hex[(c >> 4) & 0xf];
+            o += hex[c & 0xf];
+        } else o += static_cast<char>(c);
     }
     return o + '"';
 }

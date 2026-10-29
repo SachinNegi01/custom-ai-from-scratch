@@ -1,5 +1,6 @@
 #include "httplib.h"
 #include "src/vector_engine.hpp"
+#include "src/rag_engine.hpp"
 
 void cors(httplib::Response& res) {
     res.set_header("Access-Control-Allow-Origin", "*");
@@ -34,6 +35,8 @@ void loadDemo(VectorDB& db) {
 
 int main() {
     VectorDB db(DIMS);
+    DocumentDB docDB;
+    OllamaClient ollama;
     loadDemo(db);
 
     httplib::Server server;
@@ -164,6 +167,156 @@ int main() {
             + ",\"dims\":" + std::to_string(DIMS)
             + ",\"algorithms\":[\"bruteforce\",\"kdtree\",\"hnsw\"]"
             + ",\"metrics\":[\"euclidean\",\"cosine\",\"manhattan\"]}", "application/json");
+    });
+
+    server.Post("/doc/insert", [&](const httplib::Request& req, httplib::Response& res) {
+        cors(res);
+        const auto title = extractStr(req.body, "title");
+        const auto text = extractStr(req.body, "text");
+        if (title.empty() || text.empty()) {
+            res.status = 400;
+            res.set_content("{\"error\":\"need title and text\"}", "application/json");
+            return;
+        }
+        const auto chunks = chunkText(text);
+        if (chunks.empty()) {
+            res.status = 400;
+            res.set_content("{\"error\":\"document contains no words\"}", "application/json");
+            return;
+        }
+
+        std::vector<int> ids;
+        for (size_t i = 0; i < chunks.size(); ++i) {
+            const auto embedding = ollama.embed(chunks[i]);
+            if (embedding.empty()) {
+                res.status = 503;
+                res.set_content("{\"error\":\"Could not create an embedding. Check Ollama and the configured embedding model.\"}", "application/json");
+                return;
+            }
+            const auto chunkTitle = chunks.size() > 1
+                ? title + " [" + std::to_string(i + 1) + "/" + std::to_string(chunks.size()) + "]"
+                : title;
+            const int id = docDB.insert(chunkTitle, chunks[i], embedding);
+            if (id < 0) {
+                res.status = 409;
+                res.set_content("{\"error\":\"Embedding dimensions changed; all document chunks must use the same model and dimensions.\"}", "application/json");
+                return;
+            }
+            ids.push_back(id);
+        }
+        std::ostringstream json;
+        json << "{\"ids\":[";
+        for (size_t i = 0; i < ids.size(); ++i) { if (i) json << ','; json << ids[i]; }
+        json << "],\"chunks\":" << chunks.size() << ",\"dims\":" << docDB.getDims() << '}';
+        res.set_content(json.str(), "application/json");
+    });
+
+    server.Delete(R"(/doc/delete/(\d+))", [&](const httplib::Request& req, httplib::Response& res) {
+        cors(res);
+        const int id = std::stoi(req.matches[1]);
+        res.set_content("{\"ok\":" + std::string(docDB.remove(id) ? "true" : "false") + "}", "application/json");
+    });
+
+    server.Get("/doc/list", [&](const httplib::Request&, httplib::Response& res) {
+        cors(res);
+        const auto docs = docDB.all();
+        std::ostringstream json;
+        json << '[';
+        for (size_t i = 0; i < docs.size(); ++i) {
+            if (i) json << ',';
+            std::string preview = docs[i].text.substr(0, 120);
+            if (docs[i].text.size() > 120) preview += "…";
+            std::istringstream words(docs[i].text);
+            int wordCount = 0;
+            std::string word;
+            while (words >> word) ++wordCount;
+            json << "{\"id\":" << docs[i].id << ",\"title\":" << jS(docs[i].title)
+                 << ",\"preview\":" << jS(preview) << ",\"words\":" << wordCount << '}';
+        }
+        json << ']';
+        res.set_content(json.str(), "application/json");
+    });
+
+    server.Post("/doc/search", [&](const httplib::Request& req, httplib::Response& res) {
+        cors(res);
+        const auto question = extractStr(req.body, "question");
+        const int k = std::max(1, std::min(extractInt(req.body, "k", 3), 20));
+        if (question.empty()) {
+            res.status = 400;
+            res.set_content("{\"error\":\"need question\"}", "application/json");
+            return;
+        }
+        const auto query = ollama.embed(question);
+        if (query.empty()) {
+            res.status = 503;
+            res.set_content("{\"error\":\"Ollama embedding request failed\"}", "application/json");
+            return;
+        }
+        const auto hits = docDB.search(query, k);
+        std::ostringstream json;
+        json << "{\"contexts\":[";
+        for (size_t i = 0; i < hits.size(); ++i) {
+            if (i) json << ',';
+            json << "{\"id\":" << hits[i].second.id << ",\"title\":" << jS(hits[i].second.title)
+                 << ",\"distance\":" << std::fixed << std::setprecision(4) << hits[i].first << '}';
+        }
+        json << "]}";
+        res.set_content(json.str(), "application/json");
+    });
+
+    server.Post("/doc/ask", [&](const httplib::Request& req, httplib::Response& res) {
+        cors(res);
+        const auto question = extractStr(req.body, "question");
+        const int k = std::max(1, std::min(extractInt(req.body, "k", 3), 20));
+        if (question.empty()) {
+            res.status = 400;
+            res.set_content("{\"error\":\"need question\"}", "application/json");
+            return;
+        }
+        const auto query = ollama.embed(question);
+        if (query.empty()) {
+            res.status = 503;
+            res.set_content("{\"error\":\"Ollama embedding request failed\"}", "application/json");
+            return;
+        }
+        const auto hits = docDB.search(query, k);
+        std::ostringstream context;
+        for (size_t i = 0; i < hits.size(); ++i)
+            context << '[' << (i + 1) << "] " << hits[i].second.title << ":\n"
+                    << hits[i].second.text << "\n\n";
+        const std::string prompt =
+            "You are a helpful assistant. Answer the user's question directly. "
+            "Use the provided context if it contains relevant information. "
+            "If it does not, use your general knowledge. Do not mention the context.\n\n"
+            "Context:\n" + context.str() + "Question: " + question + "\n\nAnswer:";
+        const auto answer = ollama.generate(prompt);
+        if (answer.rfind("ERROR:", 0) == 0) {
+            res.status = 503;
+            res.set_content("{\"error\":" + jS(answer) + '}', "application/json");
+            return;
+        }
+        std::ostringstream json;
+        json << "{\"answer\":" << jS(answer) << ",\"model\":" << jS(ollama.genModel) << ",\"contexts\":[";
+        for (size_t i = 0; i < hits.size(); ++i) {
+            if (i) json << ',';
+            json << "{\"id\":" << hits[i].second.id << ",\"title\":" << jS(hits[i].second.title)
+                 << ",\"text\":" << jS(hits[i].second.text)
+                 << ",\"distance\":" << std::fixed << std::setprecision(4) << hits[i].first << '}';
+        }
+        json << "],\"docCount\":" << docDB.size() << '}';
+        res.set_content(json.str(), "application/json");
+    });
+
+    server.Get("/status", [&](const httplib::Request&, httplib::Response& res) {
+        cors(res);
+        const bool ollamaUp = ollama.isAvailable();
+        res.set_content("{\"ollamaAvailable\":" + std::string(ollamaUp ? "true" : "false")
+            + ",\"embedModel\":" + jS(ollama.embedModel)
+            + ",\"genModel\":" + jS(ollama.genModel)
+            + ",\"docCount\":" + std::to_string(docDB.size())
+            + ",\"docDims\":" + std::to_string(docDB.getDims())
+            + ",\"demoDims\":" + std::to_string(DIMS)
+            + ",\"demoCount\":" + std::to_string(db.size()) + '}', "application/json");
     });
 
     server.Get("/", [](const httplib::Request&, httplib::Response& res) {
