@@ -9,6 +9,7 @@ find_package(Threads REQUIRED)
 
 add_executable(custom_ai main.cpp)
 target_link_libraries(custom_ai PRIVATE Threads::Threads)
+target_compile_definitions(custom_ai PRIVATE CUSTOM_AI_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 
 if(WIN32)
     target_link_libraries(custom_ai PRIVATE ws2_32)

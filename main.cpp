@@ -166,6 +166,21 @@ int main() {
             + ",\"metrics\":[\"euclidean\",\"cosine\",\"manhattan\"]}", "application/json");
     });
 
+    server.Get("/", [](const httplib::Request&, httplib::Response& res) {
+#ifdef CUSTOM_AI_SOURCE_DIR
+        std::ifstream file(std::string(CUSTOM_AI_SOURCE_DIR) + "/index.html");
+#else
+        std::ifstream file("index.html");
+#endif
+        if (!file.is_open()) {
+            res.status = 404;
+            res.set_content("Frontend file index.html was not found.", "text/plain");
+            return;
+        }
+        res.set_content(std::string(std::istreambuf_iterator<char>(file),
+                                    std::istreambuf_iterator<char>()), "text/html");
+    });
+
     std::cout << "Vector search API listening at http://localhost:8080\n"
               << db.size() << " demo vectors | " << DIMS << " dimensions\n";
     server.listen("0.0.0.0", 8080);
