@@ -1,6 +1,6 @@
 #pragma once
 
-#include "httplib.h"
+#include "../httplib.h"
 #include "vector_engine.hpp"
 #include <utility>
 
@@ -37,27 +37,6 @@ inline std::vector<std::string> chunkText(const std::string& text,
 class OllamaClient {
     std::string host;
     int port;
-
-    static std::string escapeJson(const std::string& text) {
-        std::string out;
-        for (unsigned char ch : text) {
-            switch (ch) {
-                case '"': out += "\\\""; break;
-                case '\\': out += "\\\\"; break;
-                case '\n': out += "\\n"; break;
-                case '\r': out += "\\r"; break;
-                case '\t': out += "\\t"; break;
-                default:
-                    if (ch < 0x20) {
-                        const char hex[] = "0123456789abcdef";
-                        out += "\\u00";
-                        out += hex[(ch >> 4) & 0xf];
-                        out += hex[ch & 0xf];
-                    } else out += static_cast<char>(ch);
-            }
-        }
-        return out;
-    }
 
     static std::vector<float> parseEmbedding(const std::string& body) {
         size_t pos = body.find("\"embeddings\"");
